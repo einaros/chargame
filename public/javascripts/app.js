@@ -5,7 +5,7 @@ const height = 600;
 const rippleFactor = 0.9;
 const angleStep = 5;
 const rotationSpeedRad = 0.01;
-const frameDelay = 50;
+const frameDelay = 20;
 const massRadius = 20;
 const gravity = 10;
 
@@ -30,24 +30,16 @@ function cmyk2rgba(c, m, y, k, a) {
   return 'RGBA(' + r + ', ' + g + ', ' + b + ', ' + a + ')';
 }
 
-window.requestAnimFrame = (function(){
-  return  window.requestAnimationFrame       ||
-          window.webkitRequestAnimationFrame ||
-          window.mozRequestAnimationFrame    ||
-          window.oRequestAnimationFrame      ||
-          window.msRequestAnimationFrame     ||
-          function( callback ){
-            window.setTimeout(callback, 1000 / 60);
-          };
-})();
+window.requestAnimFrame = window.webkitRequestAnimationFrame;
 
 // World
 
-function World(radius, x, y, stamina, color, textSize) {
+function World(radius, x, y, color, textSize) {
   this.radius = radius;
   this.x = x;
   this.y = y;
-  this.stamina = stamina;
+  this.static = true;
+  this.pullingBodies = [];
   this.mass = radius * massRadius;
   this.color = color;
   this.font = textSize + 'pt Arial';
@@ -55,6 +47,26 @@ function World(radius, x, y, stamina, color, textSize) {
   this.makeShape();
   this.rotationRad = 0;
   this.maxRadius = 0;
+}
+
+World.prototype.pullByMass = function(x, y, m) {
+  var dx = x - this.x;
+  var dy = y - this.y;
+  var d = Math.sqrt(Math.pow(dx, 2) + Math.pow(dy, 2));
+  var a = Math.atan2(dy, dx);
+  var f = (gravity * m) / Math.pow(d, 2);
+  this.vx += Math.cos(a) * f;
+  this.vy += Math.sin(a) * f;
+}
+
+World.prototype.addPullingBody = function(body) {
+  this.pullingBodies.push(body);
+}
+
+World.prototype.setVelocity = function(vx, vy) {
+  this.static = vx == null;
+  this.vx = vx;
+  this.vy = vy;
 }
 
 World.prototype.explode = function(a, explsionForce) {
@@ -91,12 +103,10 @@ World.prototype.makeShape = function() {
     var a = i / 180 * Math.PI;
     var spot = {x: Math.cos(a) * this.radius, y: Math.sin(a) * this.radius, a: a, d: 0, da: 0};
     this.shape.push(spot);
-    // Depends on angleStep
-    this.angleSpotMap[r(i - 2)] = spot;
-    this.angleSpotMap[r(i - 1)] = spot;
-    this.angleSpotMap[r(i)] = spot;
-    this.angleSpotMap[r(i + 1)] = spot;
-    this.angleSpotMap[r(i + 2)] = spot;
+    var halfStep = Math.floor(angleStep/2);
+    for (var j = i - halfStep; j <= i + halfStep; ++j) {
+      this.angleSpotMap[r(j)] = spot;
+    }
   }
 }
 
@@ -104,7 +114,7 @@ World.prototype.queue = function(cb) {
   this.queued.push(cb);
 }
 
-World.prototype.tick = function(ctx) {
+World.prototype.tick = function() {
   // Execute queued functions
   var queued = this.queued;
   this.queued = [];
@@ -112,19 +122,32 @@ World.prototype.tick = function(ctx) {
     (queued[i])();
   }
 
-  // Update forces
+  // Update surface forces
   this.maxRadius = 0;
   for (var i = 0, l = this.shape.length; i < l; ++i) {
     var spot = this.shape[i];
     spot.d += spot.da;
     spot.da = 0.9 * (spot.da + 0.1 * (0 - spot.d));
-    // Update outer radius
     if (this.radius + spot.d > this.maxRadius) this.maxRadius = this.radius + spot.d;
+  }
+
+  // Pull by external objects
+  if (!this.static) {
+    for (var i = 0, l = this.pullingBodies.length; i < l; ++i) {
+      var body = this.pullingBodies[i];
+      this.pullByMass(body.x, body.y, body.mass);
+    }
+    this.x += this.vx;
+    this.y += this.vy;
   }
 
   // Rotation
   this.rotationRad = r2(this.rotationRad + rotationSpeedRad);
 
+  return true;
+}
+
+World.prototype.draw = function(ctx) {
   // Redraw world
   ctx.setFillColor(this.color);
   ctx.save();
@@ -143,7 +166,6 @@ World.prototype.tick = function(ctx) {
     ctx.restore();
   }
   ctx.restore();
-  return true;
 }
 
 // Missile
@@ -156,7 +178,7 @@ function Missile(x, y, a, v) {
   this.blown = false;
 }
 
-Missile.prototype.pullBy = function(x, y, m) {
+Missile.prototype.pullByMass = function(x, y, m) {
   var dx = x - this.x;
   var dy = y - this.y;
   var d = Math.sqrt(Math.pow(dx, 2) + Math.pow(dy, 2));
@@ -171,23 +193,22 @@ Missile.prototype.blow = function() {
   this.burning = true;
 }
 
-Missile.prototype.tick = function(ctx) {
+Missile.prototype.tick = function() {
   if (this.blown) return false;
-
-  // Update force
   this.x += this.vx;
   this.y += this.vy;
-  var a = Math.atan2(this.vy, this.vx);
+  return true;
+}
 
-  // Redraw
+Missile.prototype.draw = function(ctx) {
+  if (this.blown) return;
   ctx.setFillColor('orange');
   ctx.save();
   ctx.translate(this.x, this.y);
-  ctx.rotate(a);
+  ctx.rotate(Math.atan2(this.vy, this.vx));
   ctx.textAlign = 'right';
   ctx.fillText('->', 0, 0);
   ctx.restore();
-  return true;
 }
 
 // Explosion
@@ -208,7 +229,7 @@ function Explosion(x, y, a, count) {
   }
 }
 
-Explosion.prototype.tick = function(ctx) {
+Explosion.prototype.tick = function() {
   var active = 0;
   for (var i = 0, l = this.particles.length; i < l; ++i) {
     var particle = this.particles[i];
@@ -217,6 +238,13 @@ Explosion.prototype.tick = function(ctx) {
     ++active;
     particle.x += Math.cos(particle.a) * 6;
     particle.y += Math.sin(particle.a) * 6;
+  }
+  return active > 0;
+}
+
+Explosion.prototype.draw = function(ctx) {
+  for (var i = 0, l = this.particles.length; i < l; ++i) {
+    var particle = this.particles[i];
     ctx.save();
     var intensity = particle.life * 5 / 100;
     var color = cmyk2rgba(0, intensity, 100, 0, intensity);
@@ -226,7 +254,6 @@ Explosion.prototype.tick = function(ctx) {
     ctx.fillText('*', 0, 0);
     ctx.restore();
   }
-  return active > 0;
 }
 
 // Star
@@ -239,7 +266,9 @@ function Star(x, y) {
   this.intensity = Math.random();
 }
 
-Star.prototype.tick = function(ctx) {
+Star.prototype.tick = function() { return true; }
+
+Star.prototype.draw = function(ctx) {
   this.ticker += this.tickerSpeed;
   this.intensity = Math.sin(this.ticker);
   ctx.save();
@@ -257,6 +286,7 @@ function Game(ctx) {
   this.ctx = ctx;
   this.things = [];
   this.missiles = [];
+  this.moons = [];
 }
 
 Game.prototype.start = function(arguments) {
@@ -273,35 +303,40 @@ Game.prototype.addMissile = function(missile) {
   this.addBody(missile);
 }
 
+Game.prototype.addMoon = function(x, y, vx, vy) {
+  var moon = new World(20, x, y, 'white', 2);
+  moon.setVelocity(vx, vy);
+  moon.addPullingBody(this.earth);
+  this.addBody(moon);
+  this.moons.push(moon);
+}
+
 Game.prototype.setupWorld = function() {
-  for (var i = 0; i < 50; ++i) {
+  for (var i = 0; i < 30; ++i) {
     this.addBody(new Star(Math.random() * width, Math.random() * height));
   }
 
-  this.earth = new World(80, 600, 350, 100, cmyk2rgba(0.5, 0, 1, 0, 1), 8);
+  this.earth = new World(80, 600, 350, cmyk2rgba(0.5, 0, 1, 0, 1), 8);
   this.addBody(this.earth);
 
-  this.moonOrbitRadius = 300;
-  this.moonOrbitAngle = 0;
-  this.moonOrbitSpeed = 0.01;
-  this.moon = new World(20, 600, 350, 100, 'white', 2);
-  this.addBody(this.moon);
+  this.addMoon(300, 350, 0, 6);
+  this.addMoon(900, 350, 0, -6);
+  this.addMoon(600, 650, -6, 0);
+  this.addMoon(600, 0, 6, 0);
 
   return this.earth;
 }
 
-Game.prototype.updateMoon = function() {
-  this.moonOrbitAngle = r2(this.moonOrbitAngle + this.moonOrbitSpeed);
-  this.moon.x = this.earth.x + Math.cos(this.moonOrbitAngle) * this.moonOrbitRadius;
-  this.moon.y = this.earth.y + Math.sin(this.moonOrbitAngle) * this.moonOrbitRadius;
-}
-
 Game.prototype.updateMissiles = function() {
+  var remainingMissiles = [];
   for (var i = 0, l = this.missiles.length; i < l; ++i) {
     var missile = this.missiles[i];
-    if (missile.blown) continue;
-    missile.pullBy(this.moon.x, this.moon.y, this.moon.mass);
-    missile.pullBy(this.earth.x, this.earth.y, this.earth.mass);
+
+    missile.pullByMass(this.earth.x, this.earth.y, this.earth.mass);
+    for (var j = 0, k = this.moons.length; j < k; ++j) {
+      var moon = this.moons[j];
+      missile.pullByMass(moon.x, moon.y, moon.mass);
+    }
 
     if (this.earth.isWithinAtmosphere(missile.x, missile.y)) {
       var info = this.earth.getSurfaceHitInfo(missile.x, missile.y);
@@ -311,15 +346,24 @@ Game.prototype.updateMissiles = function() {
         this.earth.explode(info.approachAngle, 10);
       }
     }
-    if (this.moon.isWithinAtmosphere(missile.x, missile.y)) {
-      var info = this.moon.getSurfaceHitInfo(missile.x, missile.y);
-      if (info.hit) {
-        missile.blow();
-        this.addBody(new Explosion(missile.x, missile.y, info.approachAngle, 10));
-        this.moon.explode(info.approachAngle, 5);
+    else {
+      for (var j = 0, k = this.moons.length; j < k; ++j) {
+        var moon = this.moons[j];
+        if (moon.isWithinAtmosphere(missile.x, missile.y)) {
+          var info = moon.getSurfaceHitInfo(missile.x, missile.y);
+          if (info.hit) {
+            missile.blow();
+            this.addBody(new Explosion(missile.x, missile.y, info.approachAngle, 10));
+            moon.explode(info.approachAngle, 5);
+            break;
+          }
+        }
       }
     }
+
+    if (!missile.blown) remainingMissiles.push(missile);
   }
+  this.missiles = remainingMissiles;
 }
 
 Game.prototype.addBody = function(thing) {
@@ -332,13 +376,17 @@ Game.prototype.tick = function(arguments) {
   this.ctx.fillRect(0, 0, width, height);
   this.ctx.globalAlpha = 1;
 
-  this.updateMoon();
   var activeThings = [];
   for (var i = 0, l = this.things.length; i < l; ++i) {
     var thing = this.things[i];
-    if (thing.tick(this.ctx) === true) activeThings.push(thing);
+    if (thing.tick() === true) {
+      thing.draw(this.ctx);
+      activeThings.push(thing);
+    }
   }
   this.things = activeThings;
+
+  // shouldn't be here
   this.updateMissiles();
 }
 
